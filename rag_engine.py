@@ -8,46 +8,60 @@ from scraper import fetch_taoyuanq_content
 import time
 
 # 快取設定
-import redis
-# Redis Connection from Env
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+# Local Memory Cache Fallback (Global variables)
+_LOCAL_MEM_CACHE = None
+_LOCAL_MEM_CACHE_TIME = 0
+CACHE_TTL = 3600  # 1 hour
 
 def get_redis_client():
     try:
         return redis.from_url(REDIS_URL, decode_responses=True)
-    except Exception as e:
-        print(f"[Cache] Redis connection failed: {e}")
+    except Exception:
+        # 本地無 Redis 不需噴錯，靜默降級即可
         return None
 
 def get_cached_content():
     """
     獲取快取內容。優先使用 Redis，若失敗降級為本地快取或直接爬取。
     """
-    # 嘗試從 Redis 讀取
+    global _LOCAL_MEM_CACHE, _LOCAL_MEM_CACHE_TIME
+
+    # 1. 嘗試從 Redis 讀取
     r = get_redis_client()
     if r:
         try:
             cached = r.get("taoyuanq_content")
             if cached:
                 print(f"[Cache] Hit from Redis! Length: {len(cached)}")
+                # 同步更新本地快取，避免 Redis 突然斷線
+                _LOCAL_MEM_CACHE = cached
+                _LOCAL_MEM_CACHE_TIME = time.time()
                 return cached
-            else:
-                print("[Cache] Redis miss. triggering fallback scrape...")
-        except Exception as e:
-            print(f"[Cache] Redis read error: {e}")
+        except Exception:
+            pass
     
-    # Fallback: 如果 Redis 沒資料或連不上，暫時直接爬取 (為避免雪崩，建議依靠背景排程即可，但此處保留安全網)
-    print("[Cache] Falling back to direct scrape...")
+    # 2. 嘗試從本地記憶體讀取 (Redis 掛掉或沒裝時)
+    if _LOCAL_MEM_CACHE and (time.time() - _LOCAL_MEM_CACHE_TIME < CACHE_TTL):
+        print(f"[Cache] Hit from Memory! (Redis unavailable) Length: {len(_LOCAL_MEM_CACHE)}")
+        return _LOCAL_MEM_CACHE
+
+    # 3. Fallback: 真的沒資料才爬蟲
+    print("[Cache] No cache found (Redis & Local miss). Fetching live data...")
     content = fetch_taoyuanq_content()
     
+    # 4. 回寫快取
+    # 寫入本地記憶體
+    if content:
+        _LOCAL_MEM_CACHE = content
+        _LOCAL_MEM_CACHE_TIME = time.time()
+
     # 嘗試回寫 Redis
     if r and content:
         try:
             r.set("taoyuanq_content", content)
-            # Default TTL 1 hour provided by scheduler, but set here just in case
-            r.expire("taoyuanq_content", 3600) 
-        except Exception as e:
-            print(f"[Cache] Redis write error: {e}")
+            r.expire("taoyuanq_content", CACHE_TTL) 
+        except Exception:
+            pass
             
     return content
 
