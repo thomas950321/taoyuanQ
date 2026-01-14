@@ -8,6 +8,8 @@ from scraper import fetch_taoyuanq_content
 import time
 
 # 快取設定
+import json
+
 # Local Memory Cache Fallback (Global variables)
 _LOCAL_MEM_CACHE = None
 _LOCAL_MEM_CACHE_TIME = 0
@@ -22,7 +24,8 @@ def get_redis_client():
 
 def get_cached_content():
     """
-    獲取快取內容。優先使用 Redis，若失敗降級為本地快取或直接爬取。
+    獲取快取內容。
+    回傳: List[Dict] -> [{'url':..., 'content':...}]
     """
     global _LOCAL_MEM_CACHE, _LOCAL_MEM_CACHE_TIME
 
@@ -30,40 +33,118 @@ def get_cached_content():
     r = get_redis_client()
     if r:
         try:
-            cached = r.get("taoyuanq_content")
-            if cached:
-                print(f"[Cache] Hit from Redis! Length: {len(cached)}")
-                # 同步更新本地快取，避免 Redis 突然斷線
-                _LOCAL_MEM_CACHE = cached
+            cached_json = r.get("taoyuanq_pages")
+            if cached_json:
+                data = json.loads(cached_json)
+                print(f"[Cache] Hit from Redis! Pages: {len(data)}")
+                # 同步更新本地快取
+                _LOCAL_MEM_CACHE = data
                 _LOCAL_MEM_CACHE_TIME = time.time()
-                return cached
+                return data
         except Exception:
             pass
     
-    # 2. 嘗試從本地記憶體讀取 (Redis 掛掉或沒裝時)
+    # 2. 嘗試從本地記憶體讀取
     if _LOCAL_MEM_CACHE and (time.time() - _LOCAL_MEM_CACHE_TIME < CACHE_TTL):
-        print(f"[Cache] Hit from Memory! (Redis unavailable) Length: {len(_LOCAL_MEM_CACHE)}")
+        print(f"[Cache] Hit from Memory! Pages: {len(_LOCAL_MEM_CACHE)}")
         return _LOCAL_MEM_CACHE
 
-    # 3. Fallback: 真的沒資料才爬蟲
-    print("[Cache] No cache found (Redis & Local miss). Fetching live data...")
-    content = fetch_taoyuanq_content()
+    # 3. Fallback: 爬蟲抓取
+    print("[Cache] No cache found. Fetching live data...")
+    pages = fetch_taoyuanq_content()
     
-    # 4. 回寫快取
-    # 寫入本地記憶體
-    if content:
-        _LOCAL_MEM_CACHE = content
+    # 4. 回寫快取 (JSON 序列化)
+    if pages:
+        _LOCAL_MEM_CACHE = pages
         _LOCAL_MEM_CACHE_TIME = time.time()
-
-    # 嘗試回寫 Redis
-    if r and content:
-        try:
-            r.set("taoyuanq_content", content)
-            r.expire("taoyuanq_content", CACHE_TTL) 
-        except Exception:
-            pass
+        
+        if r:
+            try:
+                r.set("taoyuanq_pages", json.dumps(pages))
+                r.expire("taoyuanq_pages", CACHE_TTL) 
+            except Exception:
+                pass
             
-    return content
+    return pages
+
+import re
+
+def filter_relevant_context(question, pages_data):
+    """
+    簡易 RAG 檢索：根據使用者問題關鍵字，篩選最相關的頁面。
+    """
+    if not pages_data:
+        return ""
+        
+    # 改進：中文 N-gram 切分 (Unigram + Bigram)
+    # 這是為了讓 "南瓜"、"快閃" 這種詞能被當作一個關鍵字匹配到
+    keywords = set()
+    
+    # 1. 英數字直接用 regex 切
+    english_words = re.findall(r'[a-zA-Z0-9]+', question)
+    keywords.update(english_words)
+    
+    # 2. 中文 Bigram 切分
+    # 移除標點符號與空白，只留中文字
+    chinese_text = re.sub(r'[^\u4e00-\u9fa5]', '', question)
+    if chinese_text:
+        # Unigrams (單字)
+        keywords.update(list(chinese_text))
+        # Bigrams (雙字詞)
+        for i in range(len(chinese_text) - 1):
+            keywords.add(chinese_text[i:i+2])
+            
+    print(f"[RAG] Extracted Keywords: {keywords}")
+    
+    scored_pages = []
+    for page in pages_data:
+        content = page['content']
+        
+        # 1. Coverage Score: 有對中幾個不同的關鍵字 (最重要)
+        # 例如問 "南瓜 時間"，同時有 "南瓜" 和 "時間" 的頁面應該排前面
+        matched_keywords = [kw for kw in keywords if kw in content]
+        coverage_score = len(matched_keywords)
+        
+        # 2. Frequency Score: 關鍵字總共出現幾次 (次要)
+        frequency_score = sum(content.count(kw) for kw in matched_keywords)
+        
+        # 3. Title/Header Bonus: 如果關鍵字出現在前 200 字，給予加權
+        header_text = content[:200]
+        header_bonus = sum(1 for kw in matched_keywords if kw in header_text) * 2
+
+        final_score = (coverage_score * 100) + frequency_score + header_bonus
+        
+        # 若完全沒關鍵字，給個基本分 0
+        if final_score > 0:
+            scored_pages.append((final_score, page))
+        
+    # 排序：分數高 -> 低
+    scored_pages.sort(key=lambda x: x[0], reverse=True)
+    
+    # 取前 3-5 篇最相關的 (或全部篇幅如果不長)
+    top_k = scored_pages[:4]
+    
+    print(f"[RAG] Filtered context from {len(pages_data)} to {len(top_k)} pages based on scores.")
+    
+    # 組合成最終文本 (加入 Token/Length 限制)
+    MAX_CONTEXT_CHARS = 3000
+    final_context = ""
+    current_chars = 0
+    
+    for score, page in top_k:
+        # 簡單估算：若加入這篇會爆，就截斷或跳過
+        content_chunk = f"\n--- Source: {page['url']} (Relevance: {score}) ---\n{page['content']}\n"
+        if current_chars + len(content_chunk) > MAX_CONTEXT_CHARS:
+            # 截斷剩餘可用長度
+            remaining = MAX_CONTEXT_CHARS - current_chars
+            if remaining > 100: # 如果還剩夠多，就截斷塞入
+                final_context += content_chunk[:remaining] + "\n...(truncated)..."
+            break
+        
+        final_context += content_chunk
+        current_chars += len(content_chunk)
+        
+    return final_context
 
 # 初始化 OpenAI 客戶端
 token = os.getenv("OPENAI_API_KEY")
@@ -85,8 +166,11 @@ def ask_ai(question):
     即時爬取網站內容並使用 AI 回答問題。
     """
     print("正在獲取桃園Q資訊 (檢查快取)...")
-    # 使用快取機制獲取內容
-    live_knowledge = get_cached_content()
+    # 1. 獲取所有頁面資料 (List[Dict])
+    all_pages = get_cached_content()
+    
+    # 2. 根據問題篩選相關頁面 (RAG)
+    relevant_context = filter_relevant_context(question, all_pages)
     
     system_prompt = f"""
 # Role: 2025桃園Q・活動超級嚮導 (Taoyuan Q Super Guide)
@@ -95,32 +179,46 @@ def ask_ai(question):
 你的任務是根據使用者提供的【網站抓取資料】，回答關於活動、地點、優惠與行程的問題。
 
 # Input Data
-以下是從官網即時抓取的內容，這是你唯一已知的資訊來源：
+以下是針對使用者問題筛选出的相關官網內容：
 \"\"\"
-{live_knowledge}
+{relevant_context}
 \"\"\"
 
-# Response Guidelines (回答準則)
+# Response Guidelines (回答準則 - LINE OA 專用版)
 
-1.  **熱情與帶入感**：
-    * 請使用像朋友般輕鬆、興奮的語氣（例如：「哇！這預算太完美了！」、「記得千萬別錯過...」）。
-    * 適度使用 Emoji 來增加視覺活潑度 (🎃, 💰, ✨, 🚄)。
-    * 回答開頭或結尾可以融入活動口號 "High Five! Go FunZone!"。
+1.  **手機版面優化 (Mobile First)**：
+    *   **短段落**：手機螢幕窄，每段不要超過 3-4 行。
+    *   **善用換行**：不同主題之間務必空一行。
 
-2.  **攻略型思維 (不僅僅是回答，而是提供策略)**：
-    * **預算最大化**：若使用者提到金額，請**主動**幫他計算戰略。
-        * *範例*：「你有 1000 元？太棒了！這代表你可以累積 **2 次** 抽 $88,888 的機會（每滿 500 抽一次）！」
-    * **行動呼籲 (CTA)**：不斷提醒使用者「關鍵動作」（如：現在立刻上傳票根、結帳記得拿發票）。
+2.  **格式嚴格限制 (Plain Text ONLY)**：
+    *   ❌ **絕對禁止**：任何 Markdown 語法（如 **粗體**、# 標題、[連結](...)）。
+    *   ❌ **絕對禁止**：使用星號 (*) 做條列。
+    *   ✅ **請使用**：全形符號或 Emoji 來條列（如 「・」、「📍」、「✨」）。
 
-3.  **結構化但自然**：不要死板的條列，而是用「導覽」的方式呈現。
-    * 📍 **去哪裡玩 (Hot Spots)**：根據網站列出的合作店家（如華泰、Xpark...）推薦。
-    * 🎯 **你的專屬攻略 (Strategy)**：針對使用者條件（預算/時間）的客製化建議。
-    * 🎁 **不花錢也能玩 (Freebie)**：強調尋寶、即時抽等免費活動。
-    * � **小編提醒**：任何關於截止日期、地點限制的重要備註。
+3.  **語氣與結構**：
+    *   **熱情夥伴**：像個旅遊達人朋友，High 起來！(口號: "High Five! Go FunZone!")
+    *   **結構化導覽**：
+        📍 【去哪裡玩】
+        💰 【優惠攻略】
+        🚄 【交通/其他】
+    *   **行動呼籲**：提醒「上傳發票」、「最後期限」。
 
-4.  **資料邊界控制 (Strict Context)**：
-    * **嚴格限制**：只能回答【網站抓取資料】內有的資訊。
-    * **圓滑避險**：如果資料裡找不到答案（例如：「停車費多少？」網站若沒寫），請誠實但委婉地說：「哎呀，目前的活動官網資料中沒有特別提到這點，建議您直接詢問現場服務台，或是專注在我們的抽獎活動上喔！」**絕對不要瞎掰不存在的資訊。**
+4.  **內容邊界**：
+    *   只回答輸入資料 (Input Data) 裡有的。
+    *   若無資料，請婉拒並引導至現場服務台，不要瞎掰。
+
+5.  **範例格式**：
+    (請參考此排版)
+    哇！你想去萬聖節活動嗎？🎃
+    
+    📍 **南瓜怪快閃 (標題直接寫，不用加粗)**
+    時間：10/26 (六) 14:00
+    地點：華泰名品城噴水池
+    
+    🎯 **小編攻略**
+    記得提早去卡位，還可以順便換限量糖果喔！🍬
+    
+    High Five! Go FunZone! ✨
 """
 
     try:
@@ -135,7 +233,10 @@ def ask_ai(question):
             presence_penalty=0.6,
             frequency_penalty=0.6
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        # 強制移除 Markdown 語法 (Double safety)
+        clean_content = content.replace("**", "").replace("##", "").replace("###", "")
+        return clean_content
     except Exception as e:
         import traceback
         traceback.print_exc()

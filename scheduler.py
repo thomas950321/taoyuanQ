@@ -2,6 +2,7 @@ import time
 import os
 import sys
 import logging
+import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import redis
@@ -21,8 +22,8 @@ REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 def get_redis_client():
     try:
         return redis.from_url(REDIS_URL, decode_responses=True)
-    except Exception as e:
-        logger.error(f"Redis connection failed: {e}")
+    except Exception:
+        # Keep silent/warn only if critical
         return None
 
 def update_cache_job():
@@ -33,9 +34,16 @@ def update_cache_job():
         if content:
             r = get_redis_client()
             if r:
-                r.set("taoyuanq_content", content)
-                r.set("last_update", time.time())
-                logger.info(f"Cache updated successfully. Length: {len(content)}")
+                try:
+                    # Save as JSON string
+                    json_content = json.dumps(content)
+                    r.set("taoyuanq_pages", json_content)
+                    r.set("last_update", time.time())
+                    # Cleanup old key
+                    r.delete("taoyuanq_content")
+                    logger.info(f"Cache updated successfully. Pages: {len(content)}")
+                except Exception:
+                    pass
             else:
                 logger.warning("Redis not available. Scraped content not saved.")
         else:
@@ -51,18 +59,19 @@ def start_scheduler():
         trigger=IntervalTrigger(minutes=30),
         id='scraper_job',
         replace_existing=True,
-        next_run_time=None # Don't run immediately on start, run after interval? Or run immediately? 
-        # Actually better to run immediately once if cache is empty, but for safety lets trigger manually or just let it run.
-        # Let's run it once on startup if needed separately.
     )
     scheduler.start()
     logger.info("Scheduler started. Job will run every 30 minutes.")
     
     # Run once immediately on start if cache is empty
     r = get_redis_client()
-    if r and not r.get("taoyuanq_content"):
-         logger.info("Cache empty, running immediate initial scrape...")
-         scheduler.add_job(update_cache_job)
+    if r:
+        try:
+            if not r.get("taoyuanq_pages"):
+                 logger.info("Cache empty, running immediate initial scrape...")
+                 scheduler.add_job(update_cache_job)
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     # If run directly, keep alive

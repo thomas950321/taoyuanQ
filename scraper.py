@@ -38,24 +38,31 @@ def fetch_url_content(url, headers):
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # 移除雜訊
-            for script in soup(["script", "style", "nav", "footer"]):
-                script.decompose()
+            # 移除雜訊：包含導覽列、頁尾、廣告區塊、腳本
+            for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript", "iframe", "form"]):
+                tag.decompose()
             
+            # 額外清除常用的 class 名稱 (heuristic)
+            # 額外清除常用的 class 名稱 (heuristic)
+            for div in soup.find_all("div", class_=re.compile(r'(menu|sidebar|footer|copyright)', re.I)):
+                div.decompose()
+
             text = soup.get_text(separator='\n')
             lines = (line.strip() for line in text.splitlines())
+            # 合併段落，去除多餘空白
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             clean_text = '\n'.join(chunk for chunk in chunks if chunk)
             
-            return f"\n--- 來源: {url} ---\n{clean_text}\n"
+            return {'url': url, 'content': clean_text}
     except Exception:
         pass # 忽略錯誤，避免拖慢整體
-    return ""
+    return None
 
 def fetch_taoyuanq_content():
     """
     動態爬取桃園Q官網所有頁面。
     使用多執行緒加速。
+    回傳: List[Dict] -> [{'url': '...', 'content': '...'}, ...]
     """
     base_url = "https://a18.taoyuanq.com/zh"
     headers = {
@@ -71,11 +78,12 @@ def fetch_taoyuanq_content():
         # 確保首頁也在清單中
         start_urls.add(base_url)
     except Exception as e:
-        return f"網站連接失敗: {e}"
+        print(f"網站連接失敗: {e}")
+        return []
 
     print(f"發現 {len(start_urls)} 個頁面，開始並行抓取...")
     
-    combined_content = ""
+    pages_data = []
     
     # 2. 使用 ThreadPool 平行抓取所有頁面
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -84,12 +92,13 @@ def fetch_taoyuanq_content():
         for future in as_completed(future_to_url):
             url = future_to_url[future]
             try:
-                data = future.result()
-                combined_content += data
+                result = future.result()
+                if result and len(result['content']) > 50: # 過濾掉內容太少的頁面
+                    pages_data.append(result)
             except Exception as e:
                 print(f"抓取 {url} 發生錯誤: {e}")
                 
-    return combined_content
+    return pages_data
 
 if __name__ == "__main__":
     import time
