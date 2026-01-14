@@ -10,6 +10,17 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from rag_engine import ask_ai
 
 app = Flask(__name__)
+from scheduler import start_scheduler
+
+# 在 App 啟動時嘗試啟動排程器 (注意: 生產環境 Gunicorn 若多 Worker 需避免重開啟動)
+if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+    # 這裡只在非常簡單的部署或第一次加載時執行
+    # 若在 Gunicorn 下，建議 Scheduler 獨立一支 Process 跑，或是使用一個 Dedicated Worker
+    # 此處為簡化範例：
+    try:
+        start_scheduler()
+    except Exception as e:
+        app.logger.error(f"Failed to start scheduler: {e}")
 
 # 從環境變數讀取 LINE API 金鑰 (部署時需設定)
 line_bot_api = LineBotApi(os.getenv('LINE_CHANNEL_ACCESS_TOKEN', 'YOUR_ACCESS_TOKEN'))

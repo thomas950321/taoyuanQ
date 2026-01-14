@@ -5,6 +5,51 @@ from dotenv import load_dotenv
 load_dotenv()
 from openai import OpenAI
 from scraper import fetch_taoyuanq_content
+import time
+
+# 快取設定
+import redis
+# Redis Connection from Env
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+
+def get_redis_client():
+    try:
+        return redis.from_url(REDIS_URL, decode_responses=True)
+    except Exception as e:
+        print(f"[Cache] Redis connection failed: {e}")
+        return None
+
+def get_cached_content():
+    """
+    獲取快取內容。優先使用 Redis，若失敗降級為本地快取或直接爬取。
+    """
+    # 嘗試從 Redis 讀取
+    r = get_redis_client()
+    if r:
+        try:
+            cached = r.get("taoyuanq_content")
+            if cached:
+                print(f"[Cache] Hit from Redis! Length: {len(cached)}")
+                return cached
+            else:
+                print("[Cache] Redis miss. triggering fallback scrape...")
+        except Exception as e:
+            print(f"[Cache] Redis read error: {e}")
+    
+    # Fallback: 如果 Redis 沒資料或連不上，暫時直接爬取 (為避免雪崩，建議依靠背景排程即可，但此處保留安全網)
+    print("[Cache] Falling back to direct scrape...")
+    content = fetch_taoyuanq_content()
+    
+    # 嘗試回寫 Redis
+    if r and content:
+        try:
+            r.set("taoyuanq_content", content)
+            # Default TTL 1 hour provided by scheduler, but set here just in case
+            r.expire("taoyuanq_content", 3600) 
+        except Exception as e:
+            print(f"[Cache] Redis write error: {e}")
+            
+    return content
 
 # 初始化 OpenAI 客戶端
 token = os.getenv("OPENAI_API_KEY")
@@ -25,9 +70,9 @@ def ask_ai(question):
     """
     即時爬取網站內容並使用 AI 回答問題。
     """
-    print("正在從桃園Q官網獲取最新資訊...")
-    # 即時爬取網站內容
-    live_knowledge = fetch_taoyuanq_content()
+    print("正在獲取桃園Q資訊 (檢查快取)...")
+    # 使用快取機制獲取內容
+    live_knowledge = get_cached_content()
     
     system_prompt = f"""
 # Role: 2025桃園Q・活動超級嚮導 (Taoyuan Q Super Guide)
