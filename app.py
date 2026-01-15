@@ -103,6 +103,17 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+    msg_text = event.message.text
+    
+    # 判斷是否為群組或多人聊天室
+    if event.source.type in ['group', 'room']:
+        # 在群組中，只有被 "@TaoyuanQ" 或 "@Q醬" 標記時才回應
+        # 注意：使用者在 LINE 中 @Bot 時，實際文字通常會包含 "@Display Name"
+        keywords = ["@TaoyuanQ", "@Q醬", "@桃園Q"] 
+        if not any(k in msg_text for k in keywords):
+            # 未被呼叫，忽略此訊息 (不回傳 200 以外的狀態，直接結束即可)
+            return
+
     # 啟動背景執行緒處理，讓 Webhook 能立刻回傳 200 OK
     thread = threading.Thread(target=process_message_background, args=(event,))
     thread.start()
