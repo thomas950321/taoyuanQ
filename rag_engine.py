@@ -69,81 +69,69 @@ def get_cached_content():
 
 import re
 
+
 def filter_relevant_context(question, pages_data):
     """
-    簡易 RAG 檢索：根據使用者問題關鍵字，篩選最相關的頁面。
+    直接回傳所有爬取到的內容 (Full Context)，不做切分，僅做基本排序。
     """
     if not pages_data:
         return ""
         
-    # 改進：中文 N-gram 切分 (Unigram + Bigram)
-    # 這是為了讓 "南瓜"、"快閃" 這種詞能被當作一個關鍵字匹配到
+    print(f"[RAG] Using FULL CONTEXT mode (No Chunking). Total pages: {len(pages_data)}")
+
+    # 1. 為了讓比較相關的頁面排在前面 (避免因為截斷剛好切掉重要資訊)，還是做個簡單排序
+    #    但我們會嘗試保留所有內容。
     keywords = set()
-    
-    # 1. 英數字直接用 regex 切
     english_words = re.findall(r'[a-zA-Z0-9]+', question)
     keywords.update(english_words)
-    
-    # 2. 中文 Bigram 切分
-    # 移除標點符號與空白，只留中文字
     chinese_text = re.sub(r'[^\u4e00-\u9fa5]', '', question)
     if chinese_text:
-        # Unigrams (單字)
-        keywords.update(list(chinese_text))
-        # Bigrams (雙字詞)
-        for i in range(len(chinese_text) - 1):
-            keywords.add(chinese_text[i:i+2])
-            
-    print(f"[RAG] Extracted Keywords: {keywords}")
-    
+        keywords.update(list(chinese_text)) 
+        
     scored_pages = []
     for page in pages_data:
         content = page['content']
+        score = 0
         
-        # 1. Coverage Score: 有對中幾個不同的關鍵字 (最重要)
-        # 例如問 "南瓜 時間"，同時有 "南瓜" 和 "時間" 的頁面應該排前面
-        matched_keywords = [kw for kw in keywords if kw in content]
-        coverage_score = len(matched_keywords)
+        # 簡單計算關鍵字出現次數
+        for kw in keywords:
+            if kw in content:
+                score += content.count(kw)
         
-        # 2. Frequency Score: 關鍵字總共出現幾次 (次要)
-        frequency_score = sum(content.count(kw) for kw in matched_keywords)
+        scored_pages.append({'page': page, 'score': score})
         
-        # 3. Title/Header Bonus: 如果關鍵字出現在前 200 字，給予加權
-        header_text = content[:200]
-        header_bonus = sum(1 for kw in matched_keywords if kw in header_text) * 2
-
-        final_score = (coverage_score * 100) + frequency_score + header_bonus
-        
-        # 若完全沒關鍵字，給個基本分 0
-        if final_score > 0:
-            scored_pages.append((final_score, page))
-        
-    # 排序：分數高 -> 低
-    scored_pages.sort(key=lambda x: x[0], reverse=True)
+    # 分數高 -> 低
+    scored_pages.sort(key=lambda x: x['score'], reverse=True)
     
-    # 取前 3-5 篇最相關的 (或全部篇幅如果不長)
-    top_k = scored_pages[:4]
-    
-    print(f"[RAG] Filtered context from {len(pages_data)} to {len(top_k)} pages based on scores.")
-    
-    # 組合成最終文本 (加入 Token/Length 限制)
-    MAX_CONTEXT_CHARS = 3000
+    # 2. 組裝所有內容
+    # GPT-4o-mini Context Window 很大 (128k token)，我們可以放心地塞
+    # 設定一個很高的保險上限 (例如 60,000 字，約 20k-30k tokens)
+    MAX_CONTEXT_CHARS = 60000 
     final_context = ""
     current_chars = 0
     
-    for score, page in top_k:
-        # 簡單估算：若加入這篇會爆，就截斷或跳過
-        content_chunk = f"\n--- Source: {page['url']} (Relevance: {score}) ---\n{page['content']}\n"
-        if current_chars + len(content_chunk) > MAX_CONTEXT_CHARS:
-            # 截斷剩餘可用長度
+    for item in scored_pages:
+        page = item['page']
+        score = item['score']
+        
+        formatted_page = f"\n--- Source: {page['url']} (Relevance: {score}) ---\n{page['content']}\n"
+        
+        if current_chars + len(formatted_page) > MAX_CONTEXT_CHARS:
+            # 真的爆了才截斷，但理論上不會
             remaining = MAX_CONTEXT_CHARS - current_chars
-            if remaining > 100: # 如果還剩夠多，就截斷塞入
-                final_context += content_chunk[:remaining] + "\n...(truncated)..."
+            if remaining > 100:
+                 final_context += formatted_page[:remaining] + "\n...(truncated)..."
             break
+            
+        final_context += formatted_page
+        current_chars += len(formatted_page)
         
-        final_context += content_chunk
-        current_chars += len(content_chunk)
-        
+    print(f"[RAG] Context constructed with {current_chars} characters.")
+    # Debug print (Optional, can be removed if too noisy)
+    # print("-" * 20 + " RAG CONTEXT " + "-" * 20)
+    # print(final_context[:500] + "...\n(Output truncated in log)")
+    # print("-" * 50)
+    
     return final_context
 
 # 初始化 OpenAI 客戶端
