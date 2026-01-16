@@ -35,3 +35,5 @@ env/
 .idea/
 .vscode/
 *.swp
+
+chroma_db/

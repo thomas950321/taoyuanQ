@@ -11,7 +11,9 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
-from rag_engine import ask_ai
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+# from rag_engine import ask_ai # Legacy
+from advanced_rag import query_rag_advanced as ask_ai # Switch to Advanced RAG
 
 app = Flask(__name__)
 from scheduler import start_scheduler

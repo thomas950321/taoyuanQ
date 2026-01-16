@@ -4,14 +4,21 @@ import os
 # Add current path
 sys.path.append(os.getcwd())
 
-from rag_engine import ask_ai
+from advanced_rag import query_rag_advanced as ask_ai, fetch_and_process_website
 
 def main():
+    print("Initializing RAG system (Fetching website data)...")
+    try:
+        fetch_and_process_website()
+    except Exception as e:
+        print(f"Initialization warning: {e}")
+
     if len(sys.argv) > 1:
         # One-shot mode
         question = " ".join(sys.argv[1:])
-        response = ask_ai(question)
+        response, usage = ask_ai(question, return_usage=True)
         print(f"\nResponse:\n{response}")
+        print(f"\n[Token Usage] Input: {usage.get('prompt_tokens')}, Output: {usage.get('completion_tokens')}, Total: {usage.get('total_tokens')}")
     else:
         # Interactive mode
         print("=== TaoyuanQ Bot Console (Type 'exit' to quit) ===")
@@ -23,8 +30,9 @@ def main():
                 if not question.strip():
                     continue
                 print("Bot is thinking...")
-                response = ask_ai(question)
-                print(f"Bot: {response}\n")
+                response, usage = ask_ai(question, return_usage=True)
+                print(f"Bot: {response}")
+                print(f"\n[Token Usage] Input: {usage.get('prompt_tokens')}, Output: {usage.get('completion_tokens')}, Total: {usage.get('total_tokens')}\n")
             except KeyboardInterrupt:
                 break
             except Exception as e:
